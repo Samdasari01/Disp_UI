@@ -1,0 +1,203 @@
+=============================================================
+  A.R.G.M. WIRING GUIDE
+  Device (ESP-A) + Receiver (ESP-B)
+=============================================================
+
+
+===========================================================
+  ESP-A: DEVICE (ILI9488 TFT + Sensors + Buttons)
+===========================================================
+
+  Board: ESP32 Dev Kit (any ESP32-WROOM module)
+  Display: ILI9488 3.5" TFT (320x480, SPI)
+  Firmware: Disp_UI/src/
+
+-----------------------------------------------------------
+  TFT DISPLAY (ILI9488) — SPI Bus
+-----------------------------------------------------------
+  ILI9488 Pin    ESP32 Pin     Function
+  ----------     ----------    --------
+  VCC            5V (or 3.3V)  Power
+  GND            GND           Ground
+  CS             GPIO 4        Chip Select
+  RESET          GPIO 15       Reset (directly HIGH to run)
+  DC/RS          GPIO 2        Data/Command
+  MOSI (SDI)     GPIO 23       SPI Data In
+  SCK (CLK)      GPIO 18       SPI Clock
+  LED            3.3V          Backlight (connect directly)
+  MISO (SDO)     GPIO 19       SPI Data Out (optional, for reads)
+
+  SPI Frequency: 20 MHz (configured in platformio.ini)
+
+  NOTE: GPIO 15 is a strapping pin. It must be LOW during boot
+  for normal operation. The TFT_eSPI library handles this via
+  the RST pin. If display doesn't work, check this pin.
+
+-----------------------------------------------------------
+  GEIGER COUNTER (RadiationD v1.1 / CAJOE + J305β tube)
+-----------------------------------------------------------
+  Module Pin     ESP32 Pin     Function
+  ----------     ----------    --------
+  OUT            GPIO 26       Pulse output (falling edge)
+  VCC            5V            Power (module has own regulator)
+  GND            GND           Ground
+
+  ISR: geigerISR() on FALLING edge, 2ms debounce
+  Factor: CPM × 0.00812 = µSv/h
+
+-----------------------------------------------------------
+  SHT30 TEMPERATURE/HUMIDITY SENSOR — I2C
+-----------------------------------------------------------
+  SHT30 Pin      ESP32 Pin     Function
+  ----------     ----------    --------
+
+  
+
+
+  SDA            GPIO 21       I2C Data
+  SCL            GPIO 22       I2C Clock
+  VCC            3.3V          Power
+  GND            GND           Ground
+
+  I2C Address: 0x44
+
+-----------------------------------------------------------
+  GPS MODULE — UART Serial2
+-----------------------------------------------------------
+  GPS Pin        ESP32 Pin     Function
+  ----------     ----------    --------
+  TX             GPIO 25       GPS TX → ESP RX (Serial2 RX)
+  RX             GPIO 14       GPS RX ← ESP TX (Serial2 TX)
+  VCC            3.3V or 5V    Power (check your GPS module)
+  GND            GND           Ground
+
+  Baud: 9600
+
+  NOTE: Moved from GPIO16/17 — on some boards (WROVER/PSRAM,
+  or boards sharing those pins) GPIO16/17 are not available
+  and can prevent USB/UART detection when driven.
+
+-----------------------------------------------------------
+  NAVIGATION BUTTONS — Active LOW (INPUT_PULLUP)
+-----------------------------------------------------------
+  Button         ESP32 Pin     Function
+  ------         ----------    --------
+  UP             GPIO 32       Previous page
+  DOWN           GPIO 33       Next page
+  SELECT         GPIO 27       Select / Deep sleep (long press)
+
+  Wiring: Button between GPIO pin and GND (internal pullup)
+  Long press (2s) on SELECT = deep sleep
+
+-----------------------------------------------------------
+  ESP32 GPIO USAGE SUMMARY (Device)
+-----------------------------------------------------------
+  GPIO    Used For            Status
+  ----    --------            ------
+  2       TFT DC              USED
+  4       TFT CS              USED
+  15      TFT RST             USED (strapping pin)
+  16      GPS RX (Serial2)    USED
+  17      GPS TX (Serial2)    USED
+  18      TFT SCK             USED
+  19      TFT MISO            USED
+  21      I2C SDA             USED
+  22      I2C SCL             USED
+  23      TFT MOSI            USED
+  25      GPS RX (Serial2)    USED
+  26      Geiger OUT          USED
+  27      Button SELECT       USED
+  32      Button UP           USED
+  33      Button DOWN         USED
+
+  FREE GPIOs: 0, 5, 12, 13, 34, 35, 36, 39
+  (GPIO 0, 12 are strapping — avoid)
+  (GPIO 34-39 are input-only — good for future sensors)
+
+
+===========================================================
+  ESP-B: RECEIVER (Waveshare 1.47" ST7789 Display)
+===========================================================
+
+  Board: ESP32 Dev Kit (any ESP32-WROOM module)
+  Display: Waveshare 1.47" LCD Module (172x320, SPI)
+  Firmware: receiver/src/
+
+-----------------------------------------------------------
+  WAVESHARE 1.47" LCD — SPI Bus
+-----------------------------------------------------------
+  LCD Pin        ESP32 Pin     Function
+  ----------     ----------    --------
+  VCC            3.3V          Power (DO NOT use 5V!)
+  GND            GND           Ground
+  DIN (MOSI)     GPIO 23       SPI Data In
+  CLK (SCK)      GPIO 18       SPI Clock
+  CS             GPIO 5        Chip Select
+  DC             GPIO 2        Data/Command
+  RST            GPIO 4        Reset
+  BL             GPIO 15       Backlight (HIGH = on)
+
+  ST7789V3 Driver, 172x320 pixels, IPS, RGB565
+
+  NOTE: This display is 3.3V only. Do NOT connect to 5V.
+
+-----------------------------------------------------------
+  ESP32 GPIO USAGE SUMMARY (Receiver)
+-----------------------------------------------------------
+  GPIO    Used For            Status
+  ----    --------            ------
+  2       LCD DC              USED
+  5       LCD CS              USED
+  4       LCD RST             USED
+  15      LCD Backlight       USED
+  18      LCD SCK             USED
+  23      LCD MOSI            USED
+
+  FREE GPIOs: 0, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+              16, 17, 19, 21, 22, 25, 26, 27, 32, 33,
+              34, 35, 36, 39
+
+
+===========================================================
+  COMMUNICATION: ESP-NOW (Wireless)
+===========================================================
+  Protocol: ESP-NOW (built into ESP32, no extra module)
+  Mode: Device = Sender, Receiver = Listener
+  Range: ~30m indoor, ~200m outdoor (line of sight)
+  Speed: Packets sent every 1 second
+
+  Data Packet (SenderData):
+    float  doseRate       — 1-min average µSv/h
+    int    cpm            — counts per minute
+    int    statusLevel    — 0=NORMAL, 1=ELEVATED, 2=HIGH, 3=CRITICAL
+    char   nmea[128]      — raw GPS NMEA sentence
+    float  temp           — SHT30 temperature (°C)
+    float  humidity       — SHT30 humidity (%)
+    float  batteryPct     — battery percentage
+
+  Known Issue: On some ESP32 dev boards with weak 3.3V
+  regulators, enabling WiFi (required by ESP-NOW) causes
+  a voltage dip that crashes the ILI9488 display.
+  Solution: Add 1000µF cap across 3.3V/GND, or use a
+  board with a better regulator.
+
+
+===========================================================
+  FLASH ORDER
+===========================================================
+  1. Flash RECEIVER first (receiver/ folder)
+     - Open COM port, note the MAC address printed
+     - Example: CC:DB:A7:69:76:F4
+
+  2. Update MAC in device code
+     - Edit: Disp_UI/src/comms.h line 31
+     - Replace: {0xCC, 0xDB, 0xA7, 0x69, 0x76, 0xF4}
+
+  3. Flash DEVICE (Disp_UI/ folder)
+
+  4. Both boards power on → ESP-NOW connects automatically
+     - Device Serial (COM3): shows TX: data
+     - Receiver Serial (COM10): shows RX: data
+     - Receiver display: animation → CONNECTED
+
+===========================================================

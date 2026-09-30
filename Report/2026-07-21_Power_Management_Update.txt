@@ -1,0 +1,108 @@
+================================================================================
+              SESSION REPORT: A.R.G.M. — Power Management Update
+================================================================================
+
+Date:           July 21, 2026
+Session:        Power Button Feature Implementation
+Status:         Code Complete, Awaiting Hardware (MOSFET)
+
+================================================================================
+1. TASKS COMPLETED
+================================================================================
+
+1.1 Touch Protocol Review
+--------------------------------------------------------------------------------
+    - Searched all source files for touch-related code
+    - Result: No touch code found — project already uses buttons only
+    - Only reference: report.txt note "Touch disabled (XPT2046 hardware issue)"
+    - Action: None needed — codebase is clean
+
+1.2 Wiring Diagram Audit
+--------------------------------------------------------------------------------
+    Field Device (ESP32) — 14 GPIOs mapped:
+      SPI Display:     GPIO 2, 4, 15, 18, 19, 23
+      Geiger Counter:  GPIO 26
+      Nav Buttons:     GPIO 27 (SELECT), 32 (UP), 33 (DOWN)
+      SHT30 (I2C):     GPIO 21, 22 (reserved)
+      GPS (UART):      GPIO 16, 17 (reserved)
+
+    Relay Device — 3 GPIOs mapped:
+      Serial to PC:    GPIO 1, 3
+      Status LED:      NOT ASSIGNED (to be defined)
+
+1.3 Deep Sleep Power Off/On — SELECT Button
+--------------------------------------------------------------------------------
+    Feature:  Long press SELECT (2 sec) → deep sleep (power off)
+              Short press SELECT       → normal navigation
+              Press SELECT while sleeping → wake up, skip boot, go to HOME
+
+    Files modified:
+
+    src/config.h
+      + #define LONG_PRESS_MS  2000
+
+    src/buttons.h
+      + void enterDeepSleep()  declaration
+
+    src/buttons.cpp
+      + #include "ui.h" and <esp_sleep.h>
+      + selectHeld / selectPressMs state variables
+      + enterDeepSleep() function:
+          - TFT_DISPOFF (display off)
+          - TFT_SLPIN (display sleep)
+          - esp_sleep_enable_ext0_wakeup(GPIO_NUM_27, 0)
+          - esp_deep_sleep_start()
+      + pollButtons() rewritten:
+          - Tracks SELECT hold duration
+          - < 2 sec → processCommand("SELECT")
+          - >= 2 sec → enterDeepSleep()
+
+    src/main.cpp
+      + #include <esp_sleep.h>
+      + setup() checks esp_sleep_get_wakeup_cause()
+          - Wake from EXT0 → skip boot, go to PAGE_HOME
+          - Normal boot → PAGE_BOOT (original behavior)
+
+1.4 Build Verification
+--------------------------------------------------------------------------------
+    Result:   SUCCESS — 0 warnings, 0 errors
+    RAM:      7.5% (24,464 / 327,680 bytes)
+    Flash:    28.1% (367,853 / 1,310,720 bytes)
+
+================================================================================
+2. PENDING — HARDWARE NEEDED
+================================================================================
+
+    Component               Purpose                     Status
+    ----------------------  --------------------------  -----------
+    P-MOSFET (AO3401)       5V power switch on rails    On order
+    10kΩ resistor           MOSFET gate pull-up         To verify
+
+    Planned circuit:
+      USB 5V → [P-MOSFET] → Peripherals 5V rail
+                    ↑
+              GPIO 5 (spare)
+
+    Code change needed when MOSFET arrives:
+      - Add #define POWER_MOSFET_PIN 5 to config.h
+      - Add pinMode(POWER_MOSFET_PIN, OUTPUT) to setup()
+      - In enterDeepSleep(): digitalWrite(POWER_MOSFET_PIN, HIGH) before sleep
+      - In wake sequence: digitalWrite(POWER_MOSFET_PIN, LOW) to restore 5V
+
+================================================================================
+3. REMAINING TASKS (FROM PROJECT ROADMAP)
+================================================================================
+
+    Phase   Item                                Status
+    ------  ----------------------------------  -----------
+    1       SHT30 temp/humidity integration      Module on order
+    1       NEO-6M GPS integration               Module on order
+    1       MOSFET power switch                  On order (today)
+    2       ESP-NOW field-to-relay link          Not started
+    2       Relay ESP32 firmware                 Not started
+    2       30-second data aggregation           Not started
+    3       Electron desktop app                 Not started
+
+================================================================================
+                            END OF SESSION REPORT
+================================================================================

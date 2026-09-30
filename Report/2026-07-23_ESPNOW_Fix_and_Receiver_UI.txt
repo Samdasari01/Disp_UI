@@ -1,0 +1,220 @@
+=============================================================
+  A.R.G.M. — Session Report: ESP-NOW Fix + Receiver UI
+  Date: 2026-07-23
+=============================================================
+
+1. OVERVIEW
+-----------
+This session focused on two major tasks:
+
+  A. Fixing the ESP-NOW connection between device (ESP-A)
+     and receiver (ESP-B) — data was never being sent.
+  B. Redesigning the receiver display UI with a radiation
+     trefoil symbol, connection status screens, GPS satellite
+     count display, and a rotating symbol animation.
+
+
+2. ESP-NOW CONNECTION FIX
+-------------------------
+
+PROBLEM:
+  Both boards were flashed, the receiver showed "SEARCHING"
+  forever, and no data was received despite correct MAC
+  addresses.
+
+ROOT CAUSE:
+  In Disp_UI/src/main.cpp, ESP-NOW was initialized manually
+  in setup() (lines 42-52) but commsInit() from comms.cpp
+  was NEVER called. The commsUpdate() function checks a
+  static variable `peerAdded` which is set inside
+  commsInit(). Since commsInit() was never invoked,
+  peerAdded stayed false, and commsUpdate() returned
+  immediately every loop iteration — no packets were sent.
+
+  Additionally, main.cpp was doing its own esp_now_init()
+  and esp_now_add_peer() which duplicated what commsInit()
+  already does internally.
+
+FIX:
+  Replaced the manual ESP-NOW init block in main.cpp with a
+  single call to commsInit(), which handles:
+    - WiFi.mode(WIFI_STA)
+    - WiFi.disconnect()
+    - MAC address printing
+    - esp_now_init()
+    - Peer registration with receiverMAC
+    - Dose averaging initialization
+
+  Also removed the unused `commsStarted` variable.
+
+  Before (main.cpp lines 42-56):
+    if(esp_now_init() == ESP_OK) {
+        esp_now_peer_info_t peerInfo;
+        memset(&peerInfo, 0, sizeof(peerInfo));
+        memcpy(peerInfo.peer_addr, receiverMAC, 6);
+        peerInfo.channel = 0;
+        peerInfo.encrypt = false;
+        esp_now_add_peer(&peerInfo);
+        commsStarted = true;
+        Serial.println("ESP-NOW ready");
+    }
+
+  After:
+    commsInit();
+
+RESULT:
+  Device immediately started sending TX packets. Receiver
+  transitioned from SEARCHING to CONNECTED. Both serial
+  monitors confirmed data flow.
+
+
+3. RECEIVER MAC ADDRESS UPDATE
+-------------------------------
+  The receiver's MAC address in comms.h was updated from
+  0xCC:0xDB:0xA7:0x69:0x76:0xF4 to 0x08:0xB6:0x1F:0xB9:0x74:0xB0
+
+  File: Disp_UI/src/comms.h line 31
+  static const uint8_t receiverMAC[] = {0x08, 0xB6, 0x1F, 0xB9, 0x74, 0xB0};
+
+
+4. RECEIVER UI REDESIGN
+------------------------
+  The receiver display (Waveshare 1.47" ST7789, 320x172)
+  was redesigned from scratch with 4 clean states:
+
+  A. BOOT STATE (1.5s splash)
+     - Radiation trefoil symbol (emerald green, size 28)
+     - "A.R.G.M." title (text size 3, emerald)
+     - "RECEIVER" subtitle (text size 1, grey)
+
+  B. SEARCHING STATE
+     - Radiation symbol (navy blue, size 24)
+     - "SEARCHING" text (amber, text size 2)
+     - Spinning dots animation below (dual-color,
+       8-dot ring, updates every 120ms)
+
+  C. CONNECTED STATE
+     - Radiation symbol (emerald green, size 26)
+       SLOWLY ROTATING at ~60 degrees/sec
+       (erases/redraws symbol area every 50ms)
+     - Green circle outline around symbol
+     - "CONNECTED" text (emerald, text size 2)
+     - "SIGNAL OK" subtitle (grey, text size 1)
+     - Satellite count (refreshes every 1s):
+       * "SAT: X" (green) when GPS has fix
+       * "GPS WAITING..." (grey) when no fix
+
+  D. SIGNAL LOST STATE
+     - Radiation symbol (red, size 24) — BLINKING
+       on/off every 800ms
+     - "SIGNAL LOST" text (red, text size 2)
+     - "WAITING..." subtitle (grey, text size 1)
+     - Transitions back to CONNECTED when signal returns
+
+  Transitions:
+    BOOT -> SEARCHING (if no data after 1.5s)
+    BOOT -> CONNECTED (if data present after 1.5s)
+    SEARCHING -> CONNECTED (when data received)
+    CONNECTED -> LOST (when data stops for >3s)
+    LOST -> CONNECTED (when data returns)
+
+
+5. ROTATING RADIATION SYMBOL
+-----------------------------
+  The drawRadiationSymbol() function now accepts a rotation
+  angle parameter (float, degrees).
+
+  Implementation:
+    - 3 blade lobes at 120-degree intervals
+    - Each blade: arc from -18 to +18 degrees
+    - Radial fill from holeR+2 to bladeR
+    - Rotation applied as offset to base angle
+    - Animation: symbol area (72x76px) erased each frame,
+      symbol redrawn at new angle, circle outline redrawn
+    - Speed: 3 degrees per 50ms = 60 deg/sec
+    - Only animates in CONNECTED state
+
+  Non-connected states (BOOT, SEARCHING, LOST) use
+  rotation angle 0.0f (static symbol).
+
+
+6. GPS SATELLITE COUNT DISPLAY
+-------------------------------
+  The receiver already parses NMEA sentences from the
+  device's GPS module via the parseNMEA() function in
+  comms.cpp. Fields extracted:
+    - Latitude / Longitude (from GPGGA)
+    - Satellite count (field 7)
+    - Altitude (field 9)
+
+  The connected screen now shows satellite count:
+    - Parsed from rxData.nmea every 1 second
+    - Displays "SAT: X" when sats > 0
+    - Displays "GPS WAITING..." when sats = 0
+    - Ready for the BN-6M GPS module (in shipment)
+
+  Note: Currently no GPS module connected on device,
+  so display shows "GPS WAITING..." until module arrives.
+
+
+7. RECEIVER DISPLAY TECHNICAL DETAILS
+--------------------------------------
+  Display: Waveshare 1.47" LCD (ST7789V3)
+  Physical resolution: 172x320 (portrait)
+  Used as: 320x172 (landscape, rotation=1)
+
+  Init sequence:
+    tft.init(172, 320);
+    tft.setRotation(1);
+    tft.invertDisplay(true);
+
+  Pin assignments:
+    TFT_CS   = GPIO 5
+    TFT_DC   = GPIO 2
+    TFT_RST  = GPIO 4
+    TFT_BL   = GPIO 15
+    TFT_SCK  = GPIO 18
+    TFT_MOSI = GPIO 23
+
+  SPI re-init required after WiFi:
+    SPI.begin() called after WiFi.mode(WIFI_STA)
+    to prevent bus conflict.
+
+
+8. FILES MODIFIED TODAY
+------------------------
+  Disp_UI/src/main.cpp
+    - Removed manual ESP-NOW init block
+    - Replaced with commsInit() call
+    - Removed unused commsStarted variable
+
+  Disp_UI/src/comms.h
+    - Updated receiverMAC to 08:B6:1F:B9:74:B0
+
+  receiver/src/ui.cpp (complete rewrite)
+    - 4-state UI: BOOT / SEARCHING / CONNECTED / LOST
+    - Radiation trefoil symbol with rotation parameter
+    - Rotating animation on connected screen
+    - Blinking animation on signal lost screen
+    - Spinning dots on searching screen
+    - GPS satellite count display
+    - All text centered horizontally
+
+  receiver/src/display.cpp
+    - No changes (helper functions unchanged)
+
+  receiver/src/main.cpp
+    - No changes (WiFi-first init already correct)
+
+  receiver/src/comms.cpp
+    - No changes (ESP-NOW receiver + NMEA parser)
+
+
+9. BUILD STATUS
+----------------
+  Device (Disp_UI):     Builds successfully
+  Receiver (receiver/): Builds successfully
+
+  Both compile clean with no warnings.
+
+=============================================================

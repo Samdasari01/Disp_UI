@@ -1,0 +1,199 @@
+=============================================================
+  A.R.G.M. — ESP-NOW + TFT Display Conflict Report
+  Date: 2026-07-22
+=============================================================
+
+1. OVERVIEW
+-----------
+The A.R.G.M. device (ESP-A) uses an ILI9488 TFT display driven
+via SPI (TFT_eSPI library) on the following pins:
+
+    TFT_MOSI  = GPIO 23
+    TFT_MISO  = GPIO 19
+    TFT_SCLK  = GPIO 18
+    TFT_CS    = GPIO 4
+    TFT_DC    = GPIO 2
+    TFT_RST   = GPIO 15
+    SPI_FREQ  = 20 MHz
+
+We attempted to add ESP-NOW wireless communication to send
+sensor data (radiation, GPS, temp/humidity) to a receiver
+ESP-B with a Waveshare 1.47" ST7789 display.
+
+
+2. THE PROBLEM
+--------------
+When WiFi.mode(WIFI_STA) is called on the device ESP32 (required
+by ESP-NOW), the ILI9488 TFT display stops receiving SPI data
+and shows only a white backlight (backlight LED stays on, but
+no pixels are drawn).
+
+The display works perfectly WITHOUT any WiFi/ESP-NOW code.
+
+
+3. ATTEMPTED FIXES (ALL FAILED)
+-------------------------------
+
+  A. commsInit() after uiInit() (default order)
+     Result: Display goes white when WiFi.mode() fires.
+
+  B. commsInit() BEFORE uiInit() (WiFi first)
+     Result: Display white from boot.
+
+  C. Delayed WiFi init (WiFi.mode at t=3s, 5s)
+     Result: Display works during boot animation, goes white
+     the moment WiFi.mode() fires.
+
+  D. Hard RST pin toggle + SPI.begin() + tft.init() after WiFi
+     Result: Display stays white. Re-init doesn't recover it.
+
+  E. WiFi.setSleep(false) + esp_wifi_set_ps(WIFI_PS_NONE)
+     + CPU locked to 240MHz + SPI.begin() after WiFi
+     Result: Display still goes white.
+
+  F. WiFi.mode() first, esp_now_init() after display
+     Result: Same white backlight.
+
+Root observation: Once WiFi.mode(WIFI_STA) is called, the SPI
+bus used by TFT_eSPI is permanently disrupted on this board.
+No amount of SPI re-initialization recovers it.
+
+
+4. ROOT CAUSE ANALYSIS
+-----------------------
+
+The ESP32 has two SPI peripherals:
+  - SPI2 (VSPI): Default bus, used by TFT_eSPI
+    GPIO: 23 (MOSI), 19 (MISO), 18 (SCK), 5 (CS default)
+  - SPI3 (HSPI): Available for secondary devices
+
+WiFi on ESP32 does NOT directly use SPI. The WiFi radio has its
+own dedicated peripheral. However, there are three likely causes:
+
+  A. POWER SUPPLY COLLAPSE (Most Likely)
+     -------------------------------------
+     The ESP32's WiFi radio draws up to 240mA during TX and
+     130mA during RX. The ILI9488 display + backlight draws
+     an additional ~80-120mA. Total peak demand: ~400-500mA.
+
+     Cheap ESP32 dev boards use an AMS1117-3.3V regulator rated
+     at 800mA, but with poor thermal performance and high dropout
+     voltage. Under combined WiFi + display load, the 3.3V rail
+     dips below the ILI9488's minimum operating voltage (2.8V).
+
+     This causes the ILI9488 controller to reset or enter an
+     undefined state. The SPI commands are lost. The display
+     shows only backlight because the LED is on a separate
+     power path (often directly from 3.3V or 5V through a
+     current-limiting resistor).
+
+     Evidence: Re-initializing the SPI bus doesn't fix it
+     because the display controller itself has crashed/reset
+     and isn't responding to SPI commands.
+
+  B. GPIO MATRIX CONFLICT
+     ----------------------
+     On some ESP32 variants, WiFi initialization reconfigures
+     internal GPIO routing. GPIO 15 (used as TFT_RST) is also
+     a strapping pin (MTDI) that selects debug log level at
+     boot. WiFi's internal GPIO configuration may be
+     inadvertently affecting this pin.
+
+     However, we explicitly set TFT_RST as OUTPUT and drive it
+     HIGH, so this is less likely.
+
+  C. CLOCK TREE / PLL RECONFIGURATION
+     -----------------------------------
+     WiFi initialization changes the ESP32's PLL configuration
+     to generate the 40MHz radio clock. This can temporarily
+     disrupt the SPI peripheral's clock source. On boards with
+     poor decoupling, this glitch can propagate to the display.
+
+     Evidence: The display works fine during boot (before WiFi)
+     and fails exactly when WiFi.mode() fires.
+
+
+5. BOARD-SPECIFIC NOTES
+------------------------
+  - Device ESP32: Generic ESP32 dev kit (likely CH340 USB, 
+    AMS1117-3.3V regulator)
+  - Receiver ESP32: Same type board, ST7789 display works 
+    fine because WiFi is in STA-only receive mode (lower power)
+  - The receiver display works because it has NO conflicting
+    SPI device — it uses Adafruit ST7789 on its own SPI bus
+
+
+6. RECOMMENDED SOLUTIONS (in order of priority)
+------------------------------------------------
+
+  OPTION A: UART SERIAL + ESP-NOW (Hybrid)
+  -----------------------------------------
+  Use UART (GPIO wire) for the main data link instead of
+  ESP-NOW. The device transmits data packets over Serial2
+  (TX/RX pins) to the receiver. The receiver's display stays
+  on its own SPI bus with no conflict.
+
+  Pros: Guaranteed to work on any board, low latency, 
+        simple code, no WiFi needed on device side
+  Cons: Requires 2 wires + common GND between boards
+
+  OPTION B: ESP-NOW with Power Supply Fix
+  ----------------------------------------
+  Add a 1000uF electrolytic capacitor across the 3.3V and GND
+  rails of the device ESP32 to buffer the WiFi TX current
+  spikes. This prevents voltage dips that crash the display.
+
+  Hardware fix:
+    - 1000uF/6.3V electrolytic cap on 3.3V rail
+    - 100nF ceramic cap on TFT VCC pin
+    - Ensure common GND between boards
+
+  Pros: Keeps wireless communication
+  Cons: Requires soldering/hardware modification
+
+  OPTION C: Use ESP-NOW on HSPI3
+  --------------------------------
+  Switch the TFT display to use SPI3 (HSPI) instead of
+  SPI2 (VSPI) so WiFi and display use completely separate
+  SPI peripherals.
+
+  In platformio.ini add:
+    -DUSE_HSPI_PORT=1
+
+  Then remap pins to HSPI defaults:
+    GPIO 13 (MOSI), 12 (MISO), 14 (SCK), 15 (CS)
+
+  Pros: Software-only fix, keeps wireless
+  Cons: Need to remap display wiring, GPIO12 is a strapping pin
+
+  OPTION D: External Power for Display
+  -------------------------------------
+  Power the TFT display from a separate 3.3V regulator
+  (e.g., AMS1117-3.3) or from the 5V USB rail through its
+  own regulator. This isolates display power from WiFi
+  current spikes.
+
+  Pros: Clean power, works reliably
+  Cons: Additional hardware, more wiring
+
+
+7. CONCLUSION
+-------------
+The ESP-NOW protocol itself works correctly — both boards
+initialize ESP-NOW, the receiver gets a MAC address, and
+the data packet struct is properly defined. The problem is
+purely a power/integrity issue on the device side where the
+IL9488 display's SPI bus fails when WiFi radio activates.
+
+The most practical solution that requires zero hardware
+changes is OPTION A (UART Serial) — but if wireless is
+mandatory, OPTION B (capacitor) or OPTION C (HSPI3) should
+resolve the conflict.
+
+=============================================================
+  Files Modified:
+    Disp_UI/src/main.cpp      — ESP-NOW init added
+    Disp_UI/src/comms.h       — ESP-NOW sender header
+    Disp_UI/src/comms.cpp     — ESP-NOW sender implementation
+    receiver/                 — Full PlatformIO project
+=============================================================
